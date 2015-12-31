@@ -45,8 +45,4 @@ function check() {
 }
 
 #main
-while :
-do
-    check
-    sleep 1
-done
+check
