@@ -14,10 +14,10 @@ start_subreq_cmd="nohup python /usr/home/delong1/newstats.py -f /data0/nginx/log
 function restart() {
     local category=$1
     if [ $category = "access" ]; then
-        $start_access_cmd
+        eval $start_access_cmd
         is_access_running=true
     elif [ $category = "subreq" ]; then
-        $start_subreq_cmd
+        eval $start_subreq_cmd
         is_subreq_running=true
     fi
 }
