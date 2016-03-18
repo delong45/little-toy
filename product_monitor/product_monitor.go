@@ -266,6 +266,6 @@ func main() {
 	for {
 		RequestMonitor()
 		ImpressionMonitor()
-		time.Sleep(time.Second * 3)
+		time.Sleep(time.Minute)
 	}
 }
