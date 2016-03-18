@@ -7,6 +7,8 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -31,8 +33,33 @@ type DruidQuery struct {
 	Context      map[string]int         `json:"context"`
 }
 
+type DruidRequestResult struct {
+	Event     EventRequest `json:"event"`
+	Timestamp string       `json:"timestamp"`
+	Version   string       `json:"version"`
+}
+
+type DruidImpressionResult struct {
+	Event     EventImpression `json:"event"`
+	Timestamp string          `json:"timestamp"`
+	Version   string          `json:"version"`
+}
+
+type EventRequest struct {
+	Count     float64 `json:"count"`
+	Product_r string  `json:"product_r"`
+}
+
+type EventImpression struct {
+	Count float64 `json:"count"`
+	Type  string  `json:"type"`
+}
+
+const DruidTimeFormat = "2006-01-02T15:04:05.000Z"
+const DruidQueryInterval = 5
+
 func QueryDruid(url string, jsonStr []byte) []byte {
-	fmt.Println("URL:>", url)
+	fmt.Println("Druid URL:>", url)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
 	req.Header.Set("X-Custom-Header", "myvalue")
 	req.Header.Set("Content-Type", "application/json")
@@ -40,7 +67,7 @@ func QueryDruid(url string, jsonStr []byte) []byte {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		panic(err)
+		fmt.Println("Client.Do Error:", err)
 	}
 	defer resp.Body.Close()
 
@@ -55,18 +82,18 @@ func QueryDruid(url string, jsonStr []byte) []byte {
 func WriteGraphite(service string, msg string) {
 	conn, err := net.Dial("tcp", service)
 	if err != nil {
-		panic(err)
+		fmt.Println("Dial Error:", err)
 	}
 	_, err = conn.Write([]byte(msg))
 	if err != nil {
-		fmt.Println("Write error: %s", err.Error())
+		fmt.Println("Write Error:", err)
 	}
 	defer conn.Close()
 }
 
 func CreateIntervals() string {
-	start := time.Now().Add(-time.Minute * 10)
-	end := start.Add(+time.Minute * 5)
+	start := time.Now().Add(-time.Minute * DruidQueryInterval * 2)
+	end := start.Add(+time.Minute * DruidQueryInterval)
 	startStr := start.Format("2006-01-02T15:04:05+08:00")
 	endStr := end.Format("2006-01-02T15:04:05+08:00")
 	intervals := startStr + "/" + endStr
@@ -94,13 +121,12 @@ func CreateRequestJson() []byte {
 
 	jsonStr, err := json.Marshal(query)
 	if err != nil {
-		fmt.Println("json err:", err)
+		fmt.Println("Marshal Error:", err)
 	}
-
 	return jsonStr
 }
 
-func CreateImpressJson() []byte {
+func CreateImpressionJson() []byte {
 	var query DruidQuery
 
 	query.QueryType = "groupBy"
@@ -121,42 +147,125 @@ func CreateImpressJson() []byte {
 
 	jsonStr, err := json.Marshal(query)
 	if err != nil {
-		fmt.Println("json err:", err)
+		fmt.Println("Marshal Error:", err)
 	}
-
 	return jsonStr
 }
 
-func RequestParse() {
+func RequestParse(body []byte) string {
+	var msg string
+	var requests []DruidRequestResult
 
+	err := json.Unmarshal(body, &requests)
+	if err != nil {
+		fmt.Println("Unmarshal Error:", err)
+	}
+
+	var druidTime string
+	var timeStamp string
+	key := "uve_stats.product.requests"
+
+	if len(requests) > 0 {
+		druidTime = requests[0].Timestamp
+		t, _ := time.Parse(DruidTimeFormat, druidTime)
+		t = t.Add(+time.Minute * DruidQueryInterval)
+		timeStamp = fmt.Sprintf("%d", t.Unix())
+	}
+
+	m := make(map[string]int)
+	for _, req := range requests {
+		count := int(req.Event.Count)
+		product_r := req.Event.Product_r
+		array := strings.Split(product_r, "|")
+		for _, product := range array {
+			if _, ok := m[product]; ok {
+				m[product] += count
+			} else {
+				m[product] = count
+			}
+		}
+	}
+	for k, v := range m {
+		line := key + "." + k + " " + strconv.Itoa(v) + " " + timeStamp + "\n"
+		msg += line
+	}
+
+	return msg
 }
 
-func ImpressParse() {
+func ImpressionParse(body []byte) string {
+	var msg string
+	var impressions []DruidImpressionResult
 
+	err := json.Unmarshal(body, &impressions)
+	if err != nil {
+		fmt.Println("Unmarshal Error:", err)
+	}
+
+	var druidTime string
+	var timeStamp string
+	boCount := 0
+	key := "uve_stats.product.impressions"
+
+	if len(impressions) > 0 {
+		druidTime = impressions[0].Timestamp
+		t, _ := time.Parse(DruidTimeFormat, druidTime)
+		t = t.Add(+time.Minute * DruidQueryInterval)
+		timeStamp = fmt.Sprintf("%d", t.Unix())
+	}
+
+	for _, imp := range impressions {
+		var product string
+		count := int(imp.Event.Count)
+		productType := imp.Event.Type
+
+		if p, ok := productMap[productType]; ok {
+			product = p
+		} else if strings.HasPrefix(productType, "ad_") {
+			boCount += count
+			continue
+		} else {
+			product = "empty"
+		}
+		line := key + "." + product + " " + strconv.Itoa(count) + " " + timeStamp + "\n"
+		msg += line
+	}
+
+	if boCount > 0 {
+		msg += key + ".bo" + " " + strconv.Itoa(boCount) + " " + timeStamp + "\n"
+	}
+
+	return msg
 }
 
 func RequestMonitor() {
 	url := "http://10.39.7.42:9082/druid/v2"
 	jsonStr := CreateRequestJson()
-	fmt.Println("Product Request Json String:", string(jsonStr))
+	fmt.Println("Request of Product Json String:", string(jsonStr))
 
 	body := QueryDruid(url, jsonStr)
-	fmt.Println(body)
+	msg := RequestParse(body)
+
+	service := "10.77.96.122:2003"
+	WriteGraphite(service, msg)
 }
 
-func ImpressMonitor() {
+func ImpressionMonitor() {
 	url := "http://172.16.89.128:8082/druid/v2"
-	jsonStr := CreateImpressJson()
-	fmt.Println("Product Impression Json String:", string(jsonStr))
+	jsonStr := CreateImpressionJson()
+	fmt.Println("Impression of Product Json String:", string(jsonStr))
 
 	body := QueryDruid(url, jsonStr)
-	fmt.Println(body)
+	msg := ImpressionParse(body)
+
+	service := "10.77.96.122:2003"
+	WriteGraphite(service, msg)
 }
 
 func main() {
 	for {
 		RequestMonitor()
-		ImpressMonitor()
-		time.Sleep(time.Second * 5)
+		ImpressionMonitor()
+		time.Sleep(time.Second * 3)
 	}
 }
